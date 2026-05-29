@@ -1,25 +1,28 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { PublicKey, LAMPORTS_PER_SOL } from "@solana/web3.js";
 import { useNavigate } from "react-router-dom";
 import { useAbyss, EscrowTaskAccount } from "../hooks/useAbyss";
-import { fetchSubmissions, updateSubmissionStatus, supabase } from "../lib/supabase";
+import {
+  fetchSubmissions, updateSubmissionStatus, supabase,
+  uploadTaskImages, insertTask,
+} from "../lib/supabase";
 import RegisterModal, { ProfileData } from "../components/RegisterModal";
 
 // ── Design tokens ──────────────────────────────────────────────
-const gold       = "#C9A84C";
-const goldDim    = "#8B6E2E";
-const goldGlow   = "rgba(201,168,76,0.10)";
-const black      = "#000000";
-const surface    = "#0A0A0A";
-const surface2   = "#111111";
-const border     = "#1A1A1A";
-const borderGold = "rgba(201,168,76,0.22)";
+const gold          = "#C9A84C";
+const goldDim       = "#8B6E2E";
+const goldGlow      = "rgba(201,168,76,0.10)";
+const black         = "#000000";
+const surface       = "#0A0A0A";
+const surface2      = "#111111";
+const border        = "#1A1A1A";
+const borderGold    = "rgba(201,168,76,0.22)";
 const textSecondary = "#6B5C35";
 const textMuted     = "#2E2A1E";
-const redText    = "#D97070";
-const greenText  = "#4ADE80";
+const redText       = "#D97070";
+const greenText     = "#4ADE80";
 
 const s: Record<string, React.CSSProperties> = {
   page: {
@@ -119,7 +122,7 @@ const s: Record<string, React.CSSProperties> = {
     letterSpacing: "0.18em",
     textTransform: "uppercase" as const,
   },
-  btnGold:    { background: gold, color: black },
+  btnGold:    { background: gold,        color: black },
   btnOutline: { background: "transparent", border: `1px solid ${borderGold}`, color: gold },
   btnGreen:   { background: "rgba(26,74,46,0.5)", color: greenText, border: "1px solid rgba(74,222,128,0.2)" },
   btnDim:     { background: surface2, color: textSecondary, cursor: "not-allowed" as const, border: `1px solid ${border}` },
@@ -173,6 +176,135 @@ function makeTaskRef(name: string): string {
   return `${slug}_${rand}`;
 }
 
+// ── Image Upload Zone ─────────────────────────────────────────────────────────
+interface UploadZoneProps {
+  files: File[];
+  previews: string[];
+  onChange: (files: File[], previews: string[]) => void;
+  disabled?: boolean;
+}
+
+function ImageUploadZone({ files, previews, onChange, disabled }: UploadZoneProps) {
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const addFiles = (incoming: FileList | null) => {
+    if (!incoming) return;
+    const accepted = Array.from(incoming).filter(f => f.type.startsWith("image/"));
+    const combined = [...files, ...accepted].slice(0, 10); // hard cap 10
+    const newPreviews = combined.map(f =>
+      files.includes(f)
+        ? previews[files.indexOf(f)]
+        : URL.createObjectURL(f)
+    );
+    onChange(combined, newPreviews);
+  };
+
+  const removeFile = (idx: number) => {
+    URL.revokeObjectURL(previews[idx]);
+    const newFiles    = files.filter((_, i) => i !== idx);
+    const newPreviews = previews.filter((_, i) => i !== idx);
+    onChange(newFiles, newPreviews);
+  };
+
+  return (
+    <div style={{ marginBottom: "1.2rem" }}>
+      {/* Drop zone */}
+      <div
+        onClick={() => !disabled && inputRef.current?.click()}
+        onDragOver={e => { e.preventDefault(); if (!disabled) setDragging(true); }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={e => {
+          e.preventDefault(); setDragging(false);
+          if (!disabled) addFiles(e.dataTransfer.files);
+        }}
+        style={{
+          border: `1px dashed ${dragging ? gold : borderGold}`,
+          background: dragging ? "rgba(201,168,76,0.07)" : "#060606",
+          padding: "2rem",
+          textAlign: "center",
+          cursor: disabled ? "not-allowed" : "pointer",
+          marginBottom: "1rem",
+          transition: "border-color 0.2s, background 0.2s",
+          opacity: disabled ? 0.5 : 1,
+        }}
+      >
+        <div style={{ fontSize: "1.6rem", marginBottom: "0.5rem" }}>📁</div>
+        <div style={{ fontSize: "0.68rem", color: gold, letterSpacing: "0.1em" }}>
+          {files.length === 0
+            ? "Click or drag images here"
+            : `${files.length} image${files.length > 1 ? "s" : ""} selected`}
+        </div>
+        <div style={{ fontSize: "0.6rem", color: textSecondary, marginTop: "0.3rem", letterSpacing: "0.06em" }}>
+          5–10 images required · JPG / PNG / WEBP · max 5 MB each
+        </div>
+      </div>
+
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        multiple
+        style={{ display: "none" }}
+        onChange={e => addFiles(e.target.files)}
+        disabled={disabled}
+      />
+
+      {/* Preview grid */}
+      {previews.length > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "0.5rem" }}>
+          {previews.map((src, i) => (
+            <div key={i} style={{ position: "relative", aspectRatio: "1", border: `1px solid ${borderGold}`, overflow: "hidden" }}>
+              <img
+                src={src}
+                alt={`preview-${i}`}
+                style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+              />
+              {/* Remove button */}
+              {!disabled && (
+                <button
+                  onClick={e => { e.stopPropagation(); removeFile(i); }}
+                  style={{
+                    position: "absolute", top: "3px", right: "3px",
+                    width: "18px", height: "18px",
+                    background: "rgba(0,0,0,0.75)", border: "none",
+                    color: redText, cursor: "pointer",
+                    fontSize: "0.65rem", lineHeight: 1,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >✕</button>
+              )}
+              <div style={{
+                position: "absolute", bottom: 0, left: 0, right: 0,
+                background: "rgba(0,0,0,0.55)",
+                fontSize: "0.5rem", color: gold,
+                padding: "2px 4px", letterSpacing: "0.04em",
+                overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis",
+              }}>
+                {files[i]?.name}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Count hint */}
+      <div style={{
+        fontSize: "0.58rem", letterSpacing: "0.1em",
+        color: files.length < 5 ? redText : files.length > 10 ? redText : greenText,
+        marginTop: "0.5rem",
+      }}>
+        {files.length < 5
+          ? `Need at least ${5 - files.length} more image${5 - files.length > 1 ? "s" : ""}`
+          : files.length > 10
+          ? "Maximum 10 images"
+          : `✓ ${files.length} images ready`}
+      </div>
+    </div>
+  );
+}
+
+// ── Main component ────────────────────────────────────────────────────────────
 export default function OrgDashboard() {
   const { publicKey } = useWallet();
   const navigate = useNavigate();
@@ -182,10 +314,15 @@ export default function OrgDashboard() {
   } = useAbyss();
 
   const [tab,      setTab]      = useState<"post"|"submissions"|"escrows">("post");
-  const [taskType, setTaskType] = useState("image_label");
+  const [taskType, setTaskType] = useState<"image_label"|"rlhf">("image_label");
   const [reward,   setReward]   = useState("0.05");
   const [slots,    setSlots]    = useState("5");
   const [taskName, setTaskName] = useState("");
+
+  // image upload state — only relevant when taskType === "image_label"
+  const [imageFiles,    setImageFiles]    = useState<File[]>([]);
+  const [imagePreviews, setImagePreviews] = useState<string[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<string | null>(null);
 
   const [submissions,   setSubmissions]   = useState<any[]>([]);
   const [subLoading,    setSubLoading]    = useState(false);
@@ -193,6 +330,15 @@ export default function OrgDashboard() {
   const [lastTx,        setLastTx]        = useState<string|null>(null);
   const [localError,    setLocalError]    = useState<string|null>(null);
   const [showModal,     setShowModal]     = useState(false);
+
+  // reset image state when task type changes
+  useEffect(() => {
+    if (taskType !== "image_label") {
+      imagePreviews.forEach(URL.revokeObjectURL);
+      setImageFiles([]);
+      setImagePreviews([]);
+    }
+  }, [taskType]);
 
   useEffect(() => {
     if (!publicKey || loading) return;
@@ -238,17 +384,77 @@ export default function OrgDashboard() {
   };
 
   const handlePost = async () => {
+    setLocalError(null);
     if (!taskName.trim()) return setLocalError("Fill task name");
     if (!orgAccount)      return setLocalError("Register as org first");
+    if (!publicKey)       return setLocalError("Wallet not connected");
+
     const rewardNum = parseFloat(reward);
     const slotsNum  = parseInt(slots);
-    if (isNaN(rewardNum) || rewardNum <= 0) return setLocalError("Invalid reward");
-    if (slotsNum < 5 || slotsNum > 10)     return setLocalError("Slots must be 5–10");
+    if (isNaN(rewardNum) || rewardNum <= 0)  return setLocalError("Invalid reward");
+    if (slotsNum < 5 || slotsNum > 10)       return setLocalError("Slots must be 5–10");
+
+    // image validation for image_label tasks
+    if (taskType === "image_label") {
+      if (imageFiles.length < 5)  return setLocalError("Upload at least 5 images");
+      if (imageFiles.length > 10) return setLocalError("Maximum 10 images");
+      for (const f of imageFiles) {
+        if (f.size > 5 * 1024 * 1024) return setLocalError(`${f.name} exceeds 5 MB limit`);
+      }
+    }
+
+    const taskRef = makeTaskRef(taskName);
     setPendingAction("post");
-    const sig = await postTask(makeTaskRef(taskName), rewardNum, slotsNum);
+
+    // ── Step 1: upload images to Supabase Storage ──────────────────────────
+    let imageUrls: string[] = [];
+    if (taskType === "image_label" && imageFiles.length > 0) {
+      try {
+        setUploadProgress("Uploading images…");
+        imageUrls = await uploadTaskImages(taskRef, imageFiles);
+        setUploadProgress(null);
+      } catch (e: any) {
+        setPendingAction(null);
+        setUploadProgress(null);
+        return setLocalError(e?.message ?? "Image upload failed");
+      }
+    }
+
+    // ── Step 2: post on-chain ──────────────────────────────────────────────
+    setUploadProgress("Locking SOL on-chain…");
+    const sig = await postTask(taskRef, rewardNum, slotsNum);
+    setUploadProgress(null);
+
+    if (!sig) {
+      setPendingAction(null);
+      return setLocalError(error ?? "postTask failed");
+    }
+
+    // ── Step 3: insert task row in Supabase ────────────────────────────────
+    setUploadProgress("Saving task metadata…");
+    const dbId = await insertTask({
+      id:         taskRef,
+      title:      taskName.trim(),
+      type:       taskType,
+      reward:     rewardNum.toString(),
+      difficulty: "Medium",
+      slots_max:  slotsNum,
+      org_wallet: publicKey.toString(),
+      images:     imageUrls,
+    });
+    setUploadProgress(null);
     setPendingAction(null);
-    if (sig) { setLastTx(sig); setTaskName(""); }
-    else setLocalError(error ?? "postTask failed");
+
+    if (!dbId) return setLocalError("Task posted on-chain but DB insert failed — check Supabase logs.");
+
+    // ── Reset form ─────────────────────────────────────────────────────────
+    setLastTx(sig);
+    setTaskName("");
+    setReward("0.05");
+    setSlots("5");
+    imagePreviews.forEach(URL.revokeObjectURL);
+    setImageFiles([]);
+    setImagePreviews([]);
   };
 
   const handleRelease = async (sub: any) => {
@@ -268,6 +474,11 @@ export default function OrgDashboard() {
 
   const totalEscrowSol = myEscrows.reduce(
     (acc: number, e: EscrowTaskAccount) => acc + e.reward.toNumber() / LAMPORTS_PER_SOL, 0
+  );
+
+  const isPosting = pendingAction === "post";
+  const canPost   = !!orgAccount && !isPosting && (
+    taskType !== "image_label" || (imageFiles.length >= 5 && imageFiles.length <= 10)
   );
 
   return (
@@ -294,10 +505,7 @@ export default function OrgDashboard() {
             />
           )}
 
-          {/* Back button */}
-          <button style={s.backBtn} onClick={() => navigate("/")}>
-            ← Home
-          </button>
+          <button style={s.backBtn} onClick={() => navigate("/")}>← Home</button>
 
           {/* Header */}
           <div style={s.header}>
@@ -323,7 +531,6 @@ export default function OrgDashboard() {
             </div>
           </div>
 
-          {/* Not connected */}
           {!publicKey && (
             <div style={{ ...s.cardGold, textAlign: "center", padding: "4rem 2rem" }}>
               <div style={s.eyebrow}>Authentication Required</div>
@@ -334,11 +541,11 @@ export default function OrgDashboard() {
             </div>
           )}
 
-          {/* Feedback */}
+          {/* Feedback banners */}
           {lastTx && (
             <div style={s.successBanner}>
               <span style={{ color: greenText, fontSize: "0.72rem" }}>
-                ✦ Transaction confirmed —{" "}
+                ✦ Task posted successfully —{" "}
                 <a href={`https://explorer.solana.com/tx/${lastTx}?cluster=devnet`} target="_blank" rel="noopener noreferrer"
                   style={{ color: gold, textDecoration: "underline" }}>View on Explorer ↗</a>
               </span>
@@ -352,7 +559,7 @@ export default function OrgDashboard() {
 
           {publicKey && (
             <>
-              {/* Stats grid */}
+              {/* Stats */}
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1px", background: borderGold, border: `1px solid ${borderGold}`, marginBottom: "2rem" }}>
                 {[
                   { label: "Tasks Posted",  value: String(orgAccount?.tasksPosted ?? 0) },
@@ -379,34 +586,66 @@ export default function OrgDashboard() {
                 ))}
               </div>
 
-              {/* Post Task */}
+              {/* ── POST TASK TAB ────────────────────────────────────────── */}
               {tab === "post" && (
                 <div style={s.card}>
                   <div style={{ ...s.eyebrow, marginBottom: "1.5rem" }}>New Task</div>
 
                   <label style={s.label}>Task Name</label>
-                  <input style={s.input} placeholder="e.g. Label product images for AI dataset"
-                    value={taskName} onChange={e => setTaskName(e.target.value)} />
+                  <input
+                    style={s.input}
+                    placeholder="e.g. Label product images for AI dataset"
+                    value={taskName}
+                    onChange={e => setTaskName(e.target.value)}
+                    disabled={isPosting}
+                  />
 
                   <label style={s.label}>Task Type</label>
-                  <select style={{ ...s.input, appearance: "none" as any }} value={taskType} onChange={e => setTaskType(e.target.value)}>
+                  <select
+                    style={{ ...s.input, appearance: "none" as any }}
+                    value={taskType}
+                    onChange={e => setTaskType(e.target.value as "image_label" | "rlhf")}
+                    disabled={isPosting}
+                  >
                     <option value="image_label">Image Labeling</option>
                     <option value="rlhf">AI Response Ranking (RLHF)</option>
-                    <option value="coming_soon" disabled>Audio Transcription — Coming Soon</option>
+                    <option value="coming_soon"  disabled>Audio Transcription — Coming Soon</option>
                     <option value="coming_soon2" disabled>Sentiment Labeling — Coming Soon</option>
                   </select>
+
+                  {/* ── Image upload — only for image_label ── */}
+                  {taskType === "image_label" && (
+                    <div style={{ marginBottom: "0.5rem" }}>
+                      <label style={s.label}>Task Images (5–10 required)</label>
+                      <ImageUploadZone
+                        files={imageFiles}
+                        previews={imagePreviews}
+                        onChange={(f, p) => { setImageFiles(f); setImagePreviews(p); }}
+                        disabled={isPosting}
+                      />
+                    </div>
+                  )}
 
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "1rem" }}>
                     <div>
                       <label style={s.label}>Reward per slot (SOL)</label>
-                      <input style={s.input} type="number" step="0.01" value={reward} onChange={e => setReward(e.target.value)} />
+                      <input
+                        style={s.input} type="number" step="0.01"
+                        value={reward} onChange={e => setReward(e.target.value)}
+                        disabled={isPosting}
+                      />
                     </div>
                     <div>
                       <label style={s.label}>Max Submissions (5–10)</label>
-                      <input style={s.input} type="number" min="5" max="10" value={slots} onChange={e => setSlots(e.target.value)} />
+                      <input
+                        style={s.input} type="number" min="5" max="10"
+                        value={slots} onChange={e => setSlots(e.target.value)}
+                        disabled={isPosting}
+                      />
                     </div>
                   </div>
 
+                  {/* Escrow total */}
                   <div style={{ background: surface2, border: `1px solid ${borderGold}`, padding: "1.2rem", marginBottom: "1.2rem" }}>
                     <div style={{ ...s.label, marginBottom: "0.5rem" }}>Total to lock in escrow</div>
                     <div style={{ fontSize: "1.8rem", fontFamily: "'Playfair Display', serif", color: gold }}>
@@ -419,16 +658,31 @@ export default function OrgDashboard() {
                     )}
                   </div>
 
+                  {/* Progress indicator */}
+                  {uploadProgress && (
+                    <div style={{ ...s.successBanner, marginBottom: "1rem", display: "flex", alignItems: "center", gap: "0.6rem" }}>
+                      <span style={{ fontSize: "0.75rem", animation: "spin 1s linear infinite", display: "inline-block" }}>⏳</span>
+                      <span style={{ color: gold, fontSize: "0.72rem", letterSpacing: "0.08em" }}>{uploadProgress}</span>
+                    </div>
+                  )}
+
                   <button
-                    style={{ ...s.btn, ...(orgAccount && pendingAction !== "post" ? s.btnGold : s.btnDim), width: "100%" }}
-                    onClick={handlePost} disabled={!orgAccount || loading}
+                    style={{ ...s.btn, ...(canPost ? s.btnGold : s.btnDim), width: "100%" }}
+                    onClick={handlePost}
+                    disabled={!canPost}
                   >
-                    {pendingAction === "post" ? "Locking SOL…" : !orgAccount ? "Register org first" : "Post Task & Lock SOL in Escrow"}
+                    {isPosting
+                      ? uploadProgress ?? "Processing…"
+                      : !orgAccount
+                      ? "Register org first"
+                      : taskType === "image_label" && imageFiles.length < 5
+                      ? `Upload images first (${imageFiles.length}/5)`
+                      : "Post Task & Lock SOL in Escrow"}
                   </button>
                 </div>
               )}
 
-              {/* Submissions */}
+              {/* ── SUBMISSIONS TAB ──────────────────────────────────────── */}
               {tab === "submissions" && (
                 <div style={s.card}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>
@@ -480,7 +734,7 @@ export default function OrgDashboard() {
                 </div>
               )}
 
-              {/* Escrows */}
+              {/* ── ESCROWS TAB ──────────────────────────────────────────── */}
               {tab === "escrows" && (
                 <div style={s.card}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1.5rem" }}>

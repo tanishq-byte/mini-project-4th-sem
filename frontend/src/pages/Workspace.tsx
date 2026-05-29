@@ -1,8 +1,8 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import React, { useState, useEffect, useRef, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { useAbyss } from "../hooks/useAbyss";
-import { insertSubmission, incrementSlot } from "../lib/supabase";
+import { insertSubmission, incrementSlot, fetchTaskById } from "../lib/supabase";
 
 interface Task {
   id: string;
@@ -11,6 +11,7 @@ interface Task {
   reward: string;
   difficulty: string;
   orgAuthority?: string;
+  images?: string[];
 }
 
 interface ImageLabelItem { id: number; url: string; label: string | null; }
@@ -30,12 +31,6 @@ export interface IntegritySnapshot {
   timeSpentSeconds: number;
 }
 
-const MOCK_IMAGES: ImageLabelItem[] = [
-  { id:1, url:"https://picsum.photos/seed/prod1/400/300", label:null },
-  { id:2, url:"https://picsum.photos/seed/prod2/400/300", label:null },
-  { id:3, url:"https://picsum.photos/seed/prod3/400/300", label:null },
-  { id:4, url:"https://picsum.photos/seed/prod4/400/300", label:null },
-];
 const IMAGE_LABELS = ["Electronics","Clothing","Furniture","Food","Books","Toys","Sports","Other"];
 
 const MOCK_RLHF: RlhfPair[] = [
@@ -50,7 +45,6 @@ const MOCK_RLHF: RlhfPair[] = [
     responseB:"Motivation follows action. Set a fixed daily work schedule, remove distractions, and focus on the process rather than the outcome.", chosen:null },
 ];
 
-// ─── GOLD THEME PALETTE ───────────────────────────────────────────────────────
 const GOLD       = "#D4AF37";
 const GOLD_LIGHT = "#F0CC5A";
 const GOLD_DIM   = "#8C7420";
@@ -59,7 +53,6 @@ const BG_CARD    = "rgba(212,175,55,0.06)";
 const BG_CARD2   = "rgba(212,175,55,0.10)";
 const BORDER     = "rgba(212,175,55,0.25)";
 const BORDER_MID = "rgba(212,175,55,0.45)";
-const TEXT_DIM   = "#8C7420";
 const TEXT_MUT   = "#5A4A10";
 const SUCCESS    = "#4ade80";
 const DANGER     = "#f87171";
@@ -106,11 +99,11 @@ function LivenessBox({ videoRef, livenessOk, livenessScore, totalChecks, passedC
         <video ref={videoRef} autoPlay muted playsInline style={{ width:"100%", height:"100%", objectFit:"cover", transform:"scaleX(-1)" }} />
         {isChecking && <div style={{ position:"absolute", top:0, left:0, right:0, height:"2px", background:GOLD }} />}
         {[
-          { top:"6px",    left:"6px",  borderTop:"2px solid",    borderLeft:"2px solid"  },
-          { top:"6px",    right:"6px", borderTop:"2px solid",    borderRight:"2px solid" },
-          { bottom:"6px", left:"6px",  borderBottom:"2px solid", borderLeft:"2px solid"  },
-          { bottom:"6px", right:"6px", borderBottom:"2px solid", borderRight:"2px solid" },
-        ].map((c,i) => <div key={i} style={{ position:"absolute", width:"10px", height:"10px", borderColor, ...c }} />)}
+          { top:"6px",    left:"6px",  borderTop:`2px solid ${borderColor}`,    borderLeft:`2px solid ${borderColor}`  },
+          { top:"6px",    right:"6px", borderTop:`2px solid ${borderColor}`,    borderRight:`2px solid ${borderColor}` },
+          { bottom:"6px", left:"6px",  borderBottom:`2px solid ${borderColor}`, borderLeft:`2px solid ${borderColor}`  },
+          { bottom:"6px", right:"6px", borderBottom:`2px solid ${borderColor}`, borderRight:`2px solid ${borderColor}` },
+        ].map((c,i) => <div key={i} style={{ position:"absolute", width:"10px", height:"10px", ...c }} />)}
         {isChecking && (
           <div style={{ position:"absolute", inset:0, background:"rgba(212,175,55,0.08)", display:"flex", alignItems:"center", justifyContent:"center" }}>
             <span style={{ fontSize:"0.6rem", color:GOLD_LIGHT }}>SCANNING…</span>
@@ -136,17 +129,33 @@ function LivenessBox({ videoRef, livenessOk, livenessScore, totalChecks, passedC
   );
 }
 
-function ImageLabelMode({ onProgress }: { onProgress: (n: number) => void }) {
-  const [images,  setImages]  = useState<ImageLabelItem[]>(MOCK_IMAGES);
+// Memoized — will NOT re-render when parent state changes
+const ImageLabelMode = React.memo(function ImageLabelMode({
+  onProgress,
+  taskImages,
+}: {
+  onProgress: (n: number) => void;
+  taskImages: string[];
+}) {
+  const [images,  setImages]  = useState<ImageLabelItem[]>(() =>
+    taskImages.map((url, i) => ({ id: i + 1, url, label: null }))
+  );
   const [current, setCurrent] = useState(0);
+
   const label = (lbl: string) => {
-    const updated = images.map((img,i) => i===current ? { ...img, label:lbl } : img);
-    setImages(updated);
-    onProgress(Math.round((updated.filter(i => i.label!==null).length / images.length) * 100));
-    if (current < images.length-1) setCurrent(c => c+1);
+    setImages(prev => {
+      const updated = prev.map((img, i) => i === current ? { ...img, label: lbl } : img);
+      onProgress(Math.round((updated.filter(i => i.label !== null).length / updated.length) * 100));
+      return updated;
+    });
+    setCurrent(c => Math.min(c + 1, taskImages.length - 1));
   };
+
   const img     = images[current];
-  const labeled = images.filter(i => i.label!==null).length;
+  const labeled = images.filter(i => i.label !== null).length;
+
+  if (!img) return <div style={{ textAlign:"center", padding:"2rem", color:GOLD_DIM }}>⏳ Loading images…</div>;
+
   return (
     <div>
       <div style={{ display:"flex", justifyContent:"space-between", fontSize:"0.8rem", color:GOLD_DIM, marginBottom:"0.5rem" }}>
@@ -156,7 +165,9 @@ function ImageLabelMode({ onProgress }: { onProgress: (n: number) => void }) {
         <div style={{ height:"100%", width:`${(labeled/images.length)*100}%`, background:GOLD, borderRadius:"2px", transition:"width 0.3s" }} />
       </div>
       <div style={{ ...s.card, padding:"0.5rem", marginBottom:"1rem" }}>
-        <img src={img.url} alt="label this" style={{ width:"100%", borderRadius:"8px", display:"block", maxHeight:"300px", objectFit:"cover" }} />
+        <div style={{ width:"100%", aspectRatio:"4/3", borderRadius:"8px", overflow:"hidden" }}>
+          <img src={img.url} alt="label this" style={{ width:"100%", height:"100%", objectFit:"cover", display:"block" }} />
+        </div>
         {img.label && <div style={{ textAlign:"center", marginTop:"0.5rem", color:SUCCESS, fontSize:"0.85rem" }}>✅ Labeled: <strong>{img.label}</strong></div>}
       </div>
       <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr", gap:"0.5rem", marginBottom:"1rem" }}>
@@ -169,8 +180,8 @@ function ImageLabelMode({ onProgress }: { onProgress: (n: number) => void }) {
         <button style={{ ...s.btn, ...s.ghost }} onClick={() => setCurrent(c => Math.min(images.length-1,c+1))} disabled={current===images.length-1}>Next →</button>
       </div>
       <div style={{ display:"flex", gap:"0.5rem", marginTop:"1rem", overflowX:"auto" }}>
-        {images.map((img,i) => (
-          <div key={img.id} onClick={() => setCurrent(i)} style={{ flexShrink:0, width:"60px", height:"45px", borderRadius:"6px", overflow:"hidden", border:`2px solid ${i===current?GOLD:img.label?SUCCESS:"transparent"}`, cursor:"pointer", position:"relative" }}>
+        {images.map((img, i) => (
+          <div key={img.id} onClick={() => setCurrent(i)} style={{ flexShrink:0, width:"60px", height:"45px", border: i===current ? `2px solid ${GOLD}` : img.label ? `2px solid ${SUCCESS}` : `1px solid ${BORDER}`, borderRadius:"4px", overflow:"hidden", cursor:"pointer", position:"relative" }}>
             <img src={img.url} alt="" style={{ width:"100%", height:"100%", objectFit:"cover" }} />
             {img.label && <div style={{ position:"absolute", inset:0, background:"rgba(74,222,128,0.25)", display:"flex", alignItems:"center", justifyContent:"center", fontSize:"0.7rem" }}>✓</div>}
           </div>
@@ -178,7 +189,7 @@ function ImageLabelMode({ onProgress }: { onProgress: (n: number) => void }) {
       </div>
     </div>
   );
-}
+});
 
 function RlhfMode({ onProgress }: { onProgress: (n: number) => void }) {
   const [pairs,   setPairs]   = useState<RlhfPair[]>(MOCK_RLHF);
@@ -354,10 +365,40 @@ export default function Workspace() {
   const { publicKey } = useWallet();
   const { workerAccount } = useAbyss();
 
-  const task: Task = location.state?.task ?? {
-    id:"task_001", title:"Label E-commerce Product Images",
-    type:"image_label", reward:"0.05", difficulty:"Easy",
-  };
+  const [task, setTask] = useState<Task>(
+    location.state?.task ?? {
+      id: "task_001",
+      title: "Label E-commerce Product Images",
+      type: "image_label",
+      reward: "0.05",
+      difficulty: "Easy",
+      images: [],
+    }
+  );
+
+  // Stable images ref — set once, never changes, so ImageLabelMode never remounts
+  const stableImagesRef = useRef<string[] | null>(null);
+
+  useEffect(() => {
+    if (!task.id) return;
+    fetchTaskById(task.id).then(dbTask => {
+      if (dbTask) {
+        // Store images in stable ref first
+        if (stableImagesRef.current === null && dbTask.images?.length) {
+          stableImagesRef.current = dbTask.images;
+        }
+        setTask(prev => ({
+          ...prev,
+          title:      dbTask.title,
+          type:       dbTask.type,
+          reward:     dbTask.reward,
+          difficulty: dbTask.difficulty,
+          images:     dbTask.images ?? [],
+        }));
+      }
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [task.id]);
 
   const [workProgress, setWorkProgress] = useState(0);
   const [taskEnded,    setTaskEnded]    = useState(false);
@@ -379,6 +420,9 @@ export default function Workspace() {
 
   const livenessScore = totalChecks===0 ? 0 : Math.round((passedChecks/totalChecks)*100);
   const { score: integrityScore, breakdown, buildSnapshot } = useIntegrity(elapsed, tabSwitches, livenessScore, totalChecks);
+
+  // Stable callback — never changes reference, so React.memo on ImageLabelMode holds
+  const handleProgress = useCallback((n: number) => setWorkProgress(n), []);
 
   useEffect(() => {
     if (submitted) return;
@@ -430,7 +474,7 @@ export default function Workspace() {
   useEffect(() => {
     let timeout: ReturnType<typeof setTimeout>;
     const scheduleNext = () => {
-      const delay = Math.floor(Math.random()*40+20);
+      const delay = Math.floor(Math.random()*6+5);
       timeout = setTimeout(async () => { await runLivenessCheck(); scheduleNext(); }, delay*1000);
     };
     const init = setTimeout(async () => { await runLivenessCheck(); scheduleNext(); }, 5000);
@@ -492,24 +536,21 @@ export default function Workspace() {
           Your work has been saved. The organisation will review your submission and release{" "}
           <strong style={{ color:GOLD }}>{task.reward} SOL</strong> to your wallet upon approval.
         </div>
-
         <div style={{ ...s.card, background:"rgba(74,222,128,0.08)", border:`1px solid ${SUCCESS}`, marginBottom:"1rem", textAlign:"center", minWidth:"400px" }}>
           <div style={{ color:SUCCESS, fontSize:"0.9rem" }}>✅ Submission saved to Supabase</div>
           <div style={{ color:GOLD_DIM, fontSize:"0.8rem", marginTop:"0.3rem" }}>Status: Pending org review</div>
         </div>
-
         {submitError && (
           <div style={{ ...s.card, background:"rgba(212,175,55,0.08)", border:`1px solid ${GOLD}`, marginBottom:"1rem", minWidth:"400px" }}>
             <div style={{ color:GOLD_LIGHT, fontSize:"0.8rem" }}>⚠️ {submitError}</div>
           </div>
         )}
-
         <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:"1rem", marginBottom:"1rem", minWidth:"500px" }}>
           {[
-            { label:"Integrity",  value:`${snap.finalScore}%`,       color:SUCCESS      },
-            { label:"Liveness",   value:`${snap.livenessScore}%`,    color:GOLD_LIGHT   },
-            { label:"Time Spent", value:fmt(snap.timeSpentSeconds),   color:GOLD         },
-            { label:"Reward",     value:`${task.reward} SOL`,        color:GOLD_LIGHT   },
+            { label:"Integrity",  value:`${snap.finalScore}%`,      color:SUCCESS    },
+            { label:"Liveness",   value:`${snap.livenessScore}%`,   color:GOLD_LIGHT },
+            { label:"Time Spent", value:fmt(snap.timeSpentSeconds),  color:GOLD       },
+            { label:"Reward",     value:`${task.reward} SOL`,       color:GOLD_LIGHT },
           ].map(stat => (
             <div key={stat.label} style={{ ...s.card, textAlign:"center" }}>
               <div style={{ fontSize:"1.3rem", fontWeight:"bold", color:stat.color }}>{stat.value}</div>
@@ -517,7 +558,6 @@ export default function Workspace() {
             </div>
           ))}
         </div>
-
         <div style={{ ...s.card, minWidth:"500px", marginBottom:"1.5rem" }}>
           <div style={{ fontSize:"0.75rem", color:GOLD_DIM, marginBottom:"0.8rem" }}>🔬 INTEGRITY BREAKDOWN</div>
           <div style={{ display:"grid", gridTemplateColumns:"repeat(3,1fr)", gap:"0.5rem" }}>
@@ -536,11 +576,13 @@ export default function Workspace() {
             ))}
           </div>
         </div>
-
         <button style={{ ...s.btn, ...s.purple }} onClick={() => navigate("/worker")}>← Back to Dashboard</button>
       </div>
     );
   }
+
+  // Use stable ref for images so ImageLabelMode never gets a new array reference
+  const stableImages = stableImagesRef.current ?? task.images ?? [];
 
   return (
     <div style={s.page}>
@@ -639,7 +681,11 @@ export default function Workspace() {
           <span style={{ width:"8px", height:"8px", borderRadius:"50%", background:SUCCESS, display:"inline-block" }} />
           WORKSPACE ACTIVE — Complete all items to unlock submission
         </div>
-        {task.type==="image_label" ? <ImageLabelMode onProgress={setWorkProgress} /> : <RlhfMode onProgress={setWorkProgress} />}
+        {task.type === "image_label"
+          ? stableImages.length > 0
+            ? <ImageLabelMode onProgress={handleProgress} taskImages={stableImages} />
+            : <div style={{ textAlign:"center", padding:"2rem", color:GOLD_DIM }}>⏳ Loading images…</div>
+          : <RlhfMode onProgress={setWorkProgress} />}
       </div>
 
       <LivenessBox
